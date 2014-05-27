@@ -17,9 +17,9 @@ struct CallbackHelper
 	std::string operator()(const std::string& paramString)
 	{
 		Handle<Value> argv[1];
-		argv[0] = String::New(paramString.c_str());
+		argv[0] = NanNew<String>(paramString.c_str());
 
-		auto retVal = m_apiCallbackFunc->Call(Context::GetCurrent()->Global(), 1, argv);
+		auto retVal = m_apiCallbackFunc->Call(NanGetCurrentContext()->Global(), 1, argv);
 
 		String::Utf8Value retString(retVal);
 
@@ -34,19 +34,19 @@ private:
 
 namespace duktape {
 
-Handle<Value> runSync(const Arguments& args) 
+NAN_METHOD(runSync)
 {
-	HandleScope scope;
+	NanEscapableScope();
 	if(args.Length() < 3) 
 	{
-		ThrowException(Exception::TypeError(String::New("Wrong number of arguments")));
-		return scope.Close(Undefined());
+		NanThrowError(Exception::TypeError(NanNew<String>("Wrong number of arguments")));
+		NanReturnUndefined();
 	}
 
 	if (!args[0]->IsString() || !args[1]->IsString() || !args[2]->IsString()) 
 	{
-		ThrowException(Exception::TypeError(String::New("Wrong arguments")));
-		return scope.Close(Undefined());
+		NanThrowError(Exception::TypeError(NanNew<String>("Wrong arguments")));
+		NanReturnUndefined();
 	}
 
 	duktape::DuktapeVM vm;
@@ -63,8 +63,8 @@ Handle<Value> runSync(const Arguments& args)
 			const Local<Value> value = object->Get(key);
 			if(!key->IsString() || !value->IsFunction())
 			{
-				ThrowException(Exception::Error(String::New("Error in API-definition")));
-				return scope.Close(Undefined());
+				NanThrowError(Exception::Error(NanNew<String>("Error in API-definition")));
+				NanReturnUndefined();
 			}
 
 			Local<Function> apiCallbackFunc = Local<Function>::Cast(value);
@@ -84,11 +84,10 @@ Handle<Value> runSync(const Arguments& args)
 
 	if(ret.errorCode != 0)
 	{
-		ThrowException(Exception::Error(String::New(ret.value.c_str())));
-		return scope.Close(Undefined());
+		NanThrowError(Exception::Error(NanNew<String>(ret.value.c_str())));
+		NanReturnUndefined();
 	}
-
-	return scope.Close(String::New(ret.value.c_str()));
+	NanReturnValue(NanNew<String>(ret.value.c_str()));
 }
 
 } // namespace duktape
