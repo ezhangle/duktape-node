@@ -3,8 +3,8 @@
 #include "duktapevm.h"
 #include "callback.h"
 
+#include <nan.h>
 #include <node.h>
-#include <v8.h>
 
 #include <string>
 #include <vector>
@@ -18,11 +18,11 @@ namespace {
 void cleanupUvAsync(uv_handle_s* handle);
 
 // Forward declaration for CallbackHelper.
-void callV8FunctionOnMainThread(uv_async_t* handle, int status);
+void callV8FunctionOnMainThread(uv_async_t* handle);
 
 struct WorkRequest
 {
-	WorkRequest(std::string functionName, std::string parameters, std::string script, Persistent<Function> callback):
+	WorkRequest(std::string functionName, std::string parameters, std::string script, NanCallback* callback):
 	 functionName(std::move(functionName))
 	,parameters(std::move(parameters))
 	,script(std::move(script))
@@ -36,15 +36,18 @@ struct WorkRequest
 	{
 		for(auto it = apiCallbackFunctions.begin(); it != apiCallbackFunctions.end(); ++it)
 		{
-			it->Dispose();
-			it->Clear();
+			delete *it;
+			//NanDisposePersistent(*it);
+			//it->Dispose();
+			// TODO: it->Clear();
 		}
-		callback.Dispose();
-		callback.Clear();
+		delete callback;
+		//NanDisposePersistent(callback);
+		// TODO:callback.Clear();
 	}
 
 	duktape::DuktapeVM vm;
-	std::vector< Persistent<Function> > apiCallbackFunctions;
+	std::vector< NanCallback* > apiCallbackFunctions;
 
 	// in
 	std::string functionName;
@@ -52,7 +55,7 @@ struct WorkRequest
 	std::string script;
 
 	// out
-	Persistent<Function> callback;
+	NanCallback* callback;
 	bool hasError;
 	std::string returnValue;
 };
@@ -83,7 +86,7 @@ private:
 
 struct APICallbackSignaling
 {	
-	APICallbackSignaling(Persistent<Function> callback, std::string parameter, uv_async_cb cbFunc):
+	APICallbackSignaling(NanCallback* callback, std::string parameter, uv_async_cb cbFunc):
 	 callback(callback)
 	,parameter(parameter)
 	,returnValue("")
@@ -103,7 +106,7 @@ struct APICallbackSignaling
 		uv_close((uv_handle_t*) async, &cleanupUvAsync);
 	}
 
-	Persistent<Function> callback;
+	NanCallback* callback;
 	std::string parameter;
 	std::string returnValue;
 
@@ -119,7 +122,7 @@ struct APICallbackSignaling
 
 struct CallbackHelper
 {
-	CallbackHelper(Persistent<Function> persistentApiCallbackFunc):
+	CallbackHelper(NanCallback* persistentApiCallbackFunc):
 	m_persistentApiCallbackFunc(persistentApiCallbackFunc)
 	{
 	}
@@ -148,7 +151,7 @@ struct CallbackHelper
 	}
 
 private:
-	Persistent<Function> m_persistentApiCallbackFunc;
+	NanCallback* m_persistentApiCallbackFunc;
 };
 
 void cleanupUvAsync(uv_handle_s* handle)
@@ -157,17 +160,18 @@ void cleanupUvAsync(uv_handle_s* handle)
 	delete (uv_async_t*) handle;
 }
 
-void callV8FunctionOnMainThread(uv_async_t* handle, int status) 
+void callV8FunctionOnMainThread(uv_async_t* handle) 
 {
 	auto signalData = static_cast<APICallbackSignaling*> (handle->data);
 	uv_mutex_lock(&signalData->mutex);
 
-	HandleScope scope;
+	NanScope();
 	Handle<Value> argv[1];
-	argv[0] = String::New(signalData->parameter.c_str());
-	auto retVal = signalData->callback->Call(Context::GetCurrent()->Global(), 1, argv);
-	String::Utf8Value retString(retVal);
-	signalData->returnValue = std::string(*retString);
+	argv[0] = NanNew<String>(signalData->parameter.c_str());
+	auto retVal = signalData->callback->GetFunction()->Call(NanGetCurrentContext()->Global(), 1, argv);
+
+	size_t dummy;
+	signalData->returnValue = std::string(NanCString(retVal, &dummy));
 
 	signalData->done = true;
 	uv_mutex_unlock(&signalData->mutex);
@@ -189,50 +193,51 @@ void onWorkDone(uv_work_t* req, int status)
 	ScopedUvWorkRequest uvReq(req);
 	WorkRequest* work = uvReq.getWorkRequest();
 
-	HandleScope scope;
+	NanScope();
 
 	Handle<Value> argv[2];
-	argv[0] = Boolean::New(work->hasError);
-	argv[1] = String::New(work->returnValue.c_str());
+	argv[0] = NanNew<Boolean>(work->hasError);
+	argv[1] = NanNew<String>(work->returnValue.c_str());
 
 	TryCatch try_catch;
-	work->callback->Call(Context::GetCurrent()->Global(), 2, argv);
+	work->callback->GetFunction()->Call(NanGetCurrentContext()->Global(), 2, argv);
 
 	if (try_catch.HasCaught()) 
 	{
 		FatalException(try_catch);
 	}
-	scope.Close(Undefined());
 }
 
 } // unnamed namespace
 
 namespace duktape {
 
-Handle<Value> run(const Arguments& args) 
+NAN_METHOD(run)
 {
-	HandleScope scope;
+	NanScope();
 	if(args.Length() < 5) 
 	{
-		ThrowException(Exception::TypeError(String::New("Wrong number of arguments")));
-		return scope.Close(Undefined());
+		NanThrowError(Exception::TypeError(NanNew<String>("Wrong number of arguments")));
+		NanReturnUndefined();
 	}
 
 	if (!args[0]->IsString() || !args[1]->IsString() || !args[2]->IsString() || !args[4]->IsFunction()) 
 	{
-		ThrowException(Exception::TypeError(String::New("Wrong arguments")));
-		return scope.Close(Undefined());
+		NanThrowError(Exception::TypeError(NanNew<String>("Wrong arguments")));
+		NanReturnUndefined();
 	}
 
 	String::Utf8Value functionName(args[0]->ToString());
 	String::Utf8Value parameters(args[1]->ToString());
 	String::Utf8Value script(args[2]->ToString());
-	Local<Function> returnCallback = Local<Function>::Cast(args[4]);
+
+	auto returnCallback = Handle<Function>::Cast(args[4]);
+	auto nanCallback = new NanCallback(returnCallback);
 
 	WorkRequest* workReq = new WorkRequest(	std::string(*functionName), 
 											std::string(*parameters), 
 											std::string(*script), 
-											Persistent<Function>::New(returnCallback));
+											nanCallback);
 
 	// API Handling
 	if(args[3]->IsObject())
@@ -247,19 +252,18 @@ Handle<Value> run(const Arguments& args)
 			Local<Value> value = object->Get(key);
 			if(!key->IsString() || !value->IsFunction())
 			{
-				ThrowException(Exception::Error(String::New("Error in API-definition")));
-				return scope.Close(Undefined());
+				NanThrowError(Exception::Error(NanNew<String>("Error in API-definition")));
+				NanReturnUndefined();
 			}
-
-			auto apiCallbackFunc = Local<Function>::Cast(value);
-			auto persistentApiCallbackFunc = Persistent<Function>::New(apiCallbackFunc);
-			auto duktapeToNodeBridge = duktape::Callback(CallbackHelper(persistentApiCallbackFunc));
+			auto apiCallbackFunc = Handle<Function>::Cast(value);
+			auto callback = new NanCallback(apiCallbackFunc);
+			auto duktapeToNodeBridge = duktape::Callback(CallbackHelper(callback));
 
 			// Switch ownership of Persistent-Function to workReq
-			workReq->apiCallbackFunctions.push_back(persistentApiCallbackFunc);
+			workReq->apiCallbackFunctions.push_back(callback);
 
-			String::Utf8Value keyStr(key);
-			workReq->vm.registerCallback(std::string(*keyStr), duktapeToNodeBridge);
+			size_t dummy;
+			workReq->vm.registerCallback(std::string(NanCString(key, &dummy)), duktapeToNodeBridge);
 		}
 	}
 
@@ -268,7 +272,7 @@ Handle<Value> run(const Arguments& args)
 
 	uv_queue_work(uv_default_loop(), req, onWork, onWorkDone);
 
-	return scope.Close(Undefined());
+	NanReturnUndefined();
 }
 
 } // namespace duktape
